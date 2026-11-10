@@ -373,6 +373,13 @@ class ConfigManager:
     _cached_game_accounts_configs: dict[GameConfigID, GameAccountsConfig] = attrs.field(
         default={}, init=False
     )
+    _cached_keyring_values: dict[str, str | None] = attrs.field(
+        factory=dict, init=False, repr=False
+    )
+    """
+    Keyring values read this session. Each keyring read can show the user a system
+    password prompt, and the UI needs these values many times per session.
+    """
 
     def __attrs_post_init__(self) -> None:
         self.program_config_dir.mkdir(parents=True, exist_ok=True)
@@ -730,6 +737,43 @@ class ConfigManager:
         )
         self._cached_game_accounts_configs[game_id] = config
 
+    def _get_keyring_value(self, keyring_username: str) -> str | None:
+        """
+        Get value from keyring, only accessing the keyring the first time per session.
+        Will return `None` if the value isn't found or there is no keyring backend.
+        """
+        if keyring_username in self._cached_keyring_values:
+            return self._cached_keyring_values[keyring_username]
+
+        value: str | None = None
+        try:
+            value = keyring.get_password(
+                service_name=__title__, username=keyring_username
+            )
+        except (NoKeyringError, KeyringLocked):
+            # This is also what happens when the user denies keychain access. The
+            # failure is cached, so they aren't repeatedly asked again this session.
+            logger.exception("")
+        self._cached_keyring_values[keyring_username] = value
+        return value
+
+    def _set_keyring_value(self, keyring_username: str, value: str) -> None:
+        """Save value with keyring. Will silently fail if there is no keyring backend."""
+        self._cached_keyring_values.pop(keyring_username, None)
+        with suppress(NoKeyringError, KeyringLocked):
+            keyring.set_password(
+                service_name=__title__, username=keyring_username, password=value
+            )
+            self._cached_keyring_values[keyring_username] = value
+
+    def _delete_keyring_value(self, keyring_username: str) -> None:
+        """Delete value saved with keyring"""
+        self._cached_keyring_values.pop(keyring_username, None)
+        with suppress(
+            keyring.errors.PasswordDeleteError, NoKeyringError, KeyringLocked
+        ):
+            keyring.delete_password(service_name=__title__, username=keyring_username)
+
     def _get_account_keyring_username(
         self, game_id: GameConfigID, game_account: GameAccountConfig
     ) -> str:
@@ -742,16 +786,11 @@ class ConfigManager:
         Get account password that is saved in keyring. Will return `None` if no saved
         passwords are found or there is no keyring backend.
         """
-        try:
-            return keyring.get_password(
-                service_name=__title__,
-                username=self._get_account_keyring_username(
-                    game_id=game_id, game_account=game_account
-                ),
+        return self._get_keyring_value(
+            self._get_account_keyring_username(
+                game_id=game_id, game_account=game_account
             )
-        except (NoKeyringError, KeyringLocked):
-            logger.exception("")
-            return None
+        )
 
     def save_game_account_password(
         self, game_id: GameConfigID, game_account: GameAccountConfig, password: str
@@ -760,28 +799,22 @@ class ConfigManager:
         Save account password with keyring. Will silently fail if there is no keyring
         backend.
         """
-        with suppress(NoKeyringError, KeyringLocked):
-            keyring.set_password(
-                service_name=__title__,
-                username=self._get_account_keyring_username(
-                    game_id=game_id, game_account=game_account
-                ),
-                password=password,
-            )
+        self._set_keyring_value(
+            self._get_account_keyring_username(
+                game_id=game_id, game_account=game_account
+            ),
+            password,
+        )
 
     def delete_game_account_password(
         self, game_id: GameConfigID, game_account: GameAccountConfig
     ) -> None:
         """Delete account password saved with keyring"""
-        with suppress(
-            keyring.errors.PasswordDeleteError, NoKeyringError, KeyringLocked
-        ):
-            keyring.delete_password(
-                service_name=__title__,
-                username=self._get_account_keyring_username(
-                    game_id=game_id, game_account=game_account
-                ),
+        self._delete_keyring_value(
+            self._get_account_keyring_username(
+                game_id=game_id, game_account=game_account
             )
+        )
 
     def _get_account_last_used_subscription_keyring_username(
         self, game_id: GameConfigID, game_account: GameAccountConfig
@@ -798,16 +831,11 @@ class ConfigManager:
         Get name of the subscription that was last played with from keyring.
         See `login_account.py`
         """
-        try:
-            return keyring.get_password(
-                service_name=__title__,
-                username=self._get_account_last_used_subscription_keyring_username(
-                    game_id=game_id, game_account=game_account
-                ),
+        return self._get_keyring_value(
+            self._get_account_last_used_subscription_keyring_username(
+                game_id=game_id, game_account=game_account
             )
-        except (NoKeyringError, KeyringLocked):
-            logger.exception("")
-            return None
+        )
 
     def save_game_account_last_used_subscription_name(
         self,
@@ -816,14 +844,12 @@ class ConfigManager:
         subscription_name: str,
     ) -> None:
         """Save last used subscription name with keyring"""
-        with suppress(NoKeyringError, KeyringLocked):
-            keyring.set_password(
-                service_name=__title__,
-                username=self._get_account_last_used_subscription_keyring_username(
-                    game_id=game_id, game_account=game_account
-                ),
-                password=subscription_name,
-            )
+        self._set_keyring_value(
+            self._get_account_last_used_subscription_keyring_username(
+                game_id=game_id, game_account=game_account
+            ),
+            subscription_name,
+        )
 
     def delete_game_account_last_used_subscription_name(
         self,
@@ -831,15 +857,11 @@ class ConfigManager:
         game_account: GameAccountConfig,
     ) -> None:
         """Delete last used subscription name saved with keyring"""
-        with suppress(
-            keyring.errors.PasswordDeleteError, NoKeyringError, KeyringLocked
-        ):
-            keyring.delete_password(
-                service_name=__title__,
-                username=self._get_account_last_used_subscription_keyring_username(
-                    game_id=game_id, game_account=game_account
-                ),
+        self._delete_keyring_value(
+            self._get_account_last_used_subscription_keyring_username(
+                game_id=game_id, game_account=game_account
             )
+        )
 
     def delete_game_account_keyring_info(
         self, game_id: GameConfigID, game_account: GameAccountConfig

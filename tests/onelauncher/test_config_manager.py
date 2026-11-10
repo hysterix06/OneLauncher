@@ -3,12 +3,15 @@ from pathlib import Path
 from textwrap import dedent
 from typing import Any
 
+import keyring.errors
 import pytest
 import tomlkit
+from pytest_mock import MockerFixture
 
 import onelauncher.config_manager
 from onelauncher import install_game
 from onelauncher.config import ConfigFieldMetadata, ConfigValWithMetadata
+from onelauncher.game_account_config import GameAccountConfig
 from onelauncher.program_config import ProgramConfig
 
 test_key_val_params: list[tuple[dict[str, Any], str]] = [
@@ -198,3 +201,100 @@ class TestConfigManager:
         game_config.game_directory.mkdir(parents=True)
         config_manager.delete_game_config(game_id, exclude_install_dir=True)
         assert game_config.game_directory.exists()
+
+
+class TestConfigManagerKeyring:
+    """Every keyring read can show a system password prompt to the user."""
+
+    ACCOUNT = GameAccountConfig(username="player")
+
+    def test_password_read_once_per_session(
+        self,
+        config_manager: onelauncher.config_manager.ConfigManager,
+        mocker: MockerFixture,
+    ) -> None:
+        get_password = mocker.patch("keyring.get_password", return_value="secret")
+        game_id = config_manager.get_game_config_ids()[0]
+
+        for _ in range(5):
+            assert (
+                config_manager.get_game_account_password(game_id, self.ACCOUNT)
+                == "secret"
+            )
+        get_password.assert_called_once()
+
+    def test_missing_password_read_once_per_session(
+        self,
+        config_manager: onelauncher.config_manager.ConfigManager,
+        mocker: MockerFixture,
+    ) -> None:
+        get_password = mocker.patch("keyring.get_password", return_value=None)
+        game_id = config_manager.get_game_config_ids()[0]
+
+        for _ in range(3):
+            assert (
+                config_manager.get_game_account_password(game_id, self.ACCOUNT) is None
+            )
+        get_password.assert_called_once()
+
+    def test_denied_keyring_access_only_asked_once(
+        self,
+        config_manager: onelauncher.config_manager.ConfigManager,
+        mocker: MockerFixture,
+    ) -> None:
+        get_password = mocker.patch(
+            "keyring.get_password", side_effect=keyring.errors.KeyringLocked
+        )
+        game_id = config_manager.get_game_config_ids()[0]
+
+        for _ in range(3):
+            assert (
+                config_manager.get_game_account_password(game_id, self.ACCOUNT) is None
+            )
+        get_password.assert_called_once()
+
+    def test_saved_password_replaces_cached_value(
+        self,
+        config_manager: onelauncher.config_manager.ConfigManager,
+        mocker: MockerFixture,
+    ) -> None:
+        get_password = mocker.patch("keyring.get_password", return_value="old")
+        set_password = mocker.patch("keyring.set_password")
+        game_id = config_manager.get_game_config_ids()[0]
+
+        config_manager.get_game_account_password(game_id, self.ACCOUNT)
+        config_manager.save_game_account_password(game_id, self.ACCOUNT, "new")
+
+        assert config_manager.get_game_account_password(game_id, self.ACCOUNT) == "new"
+        set_password.assert_called_once()
+        get_password.assert_called_once()
+
+    def test_failed_save_does_not_cache_unsaved_password(
+        self,
+        config_manager: onelauncher.config_manager.ConfigManager,
+        mocker: MockerFixture,
+    ) -> None:
+        get_password = mocker.patch("keyring.get_password", return_value="old")
+        mocker.patch("keyring.set_password", side_effect=keyring.errors.KeyringLocked)
+        game_id = config_manager.get_game_config_ids()[0]
+
+        config_manager.save_game_account_password(game_id, self.ACCOUNT, "new")
+
+        assert config_manager.get_game_account_password(game_id, self.ACCOUNT) == "old"
+        get_password.assert_called_once()
+
+    def test_deleted_password_is_removed_from_cache(
+        self,
+        config_manager: onelauncher.config_manager.ConfigManager,
+        mocker: MockerFixture,
+    ) -> None:
+        get_password = mocker.patch("keyring.get_password", return_value="secret")
+        delete_password = mocker.patch("keyring.delete_password")
+        game_id = config_manager.get_game_config_ids()[0]
+
+        config_manager.get_game_account_password(game_id, self.ACCOUNT)
+        config_manager.delete_game_account_password(game_id, self.ACCOUNT)
+        get_password.return_value = None
+
+        assert config_manager.get_game_account_password(game_id, self.ACCOUNT) is None
+        delete_password.assert_called_once()
