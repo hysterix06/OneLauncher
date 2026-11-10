@@ -41,7 +41,7 @@ from shutil import move, rmtree
 from tempfile import TemporaryDirectory
 from textwrap import dedent
 from types import MappingProxyType
-from typing import Final
+from typing import Final, Literal
 from urllib import request
 from urllib.error import HTTPError, URLError
 
@@ -56,18 +56,19 @@ from .wine.config import WineConfigSection
 
 logger = logging.getLogger(__name__)
 
-MACOS_WINEHQ_WINE = False
-if sys.platform == "darwin":
-    if platform.machine() == "x86_64":
-        WINE_VERSION = "WS12WineSikarugir10.0_6"
-        WINE_URL = "https://github.com/Sikarugir-App/Engines/releases/download/v1.0/WS12WineSikarugir10.0_6.tar.xz"
-    else:
-        WINE_VERSION = "wine-stable-11.0_1-osx64"
-        WINE_URL = "https://github.com/Gcenx/macOS_Wine_builds/releases/download/11.0_1/wine-stable-11.0_1-osx64.tar.xz"
-        MACOS_WINEHQ_WINE = True
+# Apple Silicon uses DXMT with Sikarugir WINE. DDO stops responding shortly after
+# starting with the WINE 11.0 and DXVK 1.10.3 combination.
+# DXMT has a memory leak with frills enabled and graphical artifacts with antialiasing.
+GRAPHICS_TRANSLATION_LAYER: Literal["DXVK", "DXMT"] = (
+    "DXMT" if sys.platform == "darwin" and platform.machine() != "x86_64" else "DXVK"
+)
 
-    DXVK_VERSION = "1.10.3-20230507-repack"
-    DXVK_URL = "https://github.com/Gcenx/DXVK-macOS/releases/download/v1.10.3-20230507-repack/dxvk-macOS-async-v1.10.3-20230507-repack.tar.gz"
+if sys.platform == "darwin":
+    WINE_VERSION = "WS12WineSikarugir10.0_6"
+    WINE_URL = "https://github.com/Sikarugir-App/Engines/releases/download/v1.0/WS12WineSikarugir10.0_6.tar.xz"
+    # Unused on macOS. Sikarugir frameworks include DXVK and DXMT.
+    DXVK_VERSION = ""
+    DXVK_URL = ""
 else:
     WINE_VERSION = "10.20-staging-tkg-amd64-wow64"
     WINE_URL = "https://github.com/Kron4ek/Wine-Builds/releases/download/10.20/wine-10.20-staging-tkg-amd64-wow64.tar.xz"
@@ -80,8 +81,9 @@ else:
 D3D_EXTRAS_VERSION = "2"
 D3D_EXTRAS_URL = "https://github.com/lutris/d3d_extras/releases/download/v2/v2.tar.xz"
 D3D_EXTRAS_HASH = "9117ac86947b53865fc0d675314179e738b1e3e38bbb4281e4afe6b665b073af"
+D3DX11_DLL_NAME = "d3dx11_43" if GRAPHICS_TRANSLATION_LAYER == "DXMT" else "d3dx11_42"
 
-# macOS only. Includes DXVK.
+# macOS only. Includes DXVK and DXMT.
 SIKARUGIR_FRAMEWORKS_VERSION = "Template-1.0.11"
 SIKARUGIR_FRAMEWORKS_URL = "https://github.com/Sikarugir-App/Wrapper/releases/download/v1.0/Template-1.0.11.tar.xz"
 
@@ -198,13 +200,6 @@ class WineManagement:
                 tar.extractall(temp_dir, filter="data")
 
             source_dir = next(temp_dir.glob("*/"))
-
-            if MACOS_WINEHQ_WINE:
-                source_dir = source_dir / "Contents/Resources/wine"
-                # Remove shipped dylibs, so Sikarugir ones are used.
-                for dylib in source_dir.glob("lib/*.dylib"):
-                    dylib.unlink()
-
             # Using `shutil.move` instead of `Path.rename`, so that it works across
             # filesystems.
             move(source_dir, self.latest_wine_path)
@@ -246,12 +241,7 @@ class WineManagement:
 
     def _inject_dxvk(self) -> None:
         """Add DXVK to the WINE prefix"""
-        dlls = (
-            ("d3d10core.dll", "d3d11.dll")
-            if sys.platform == "darwin"
-            else ("dxgi.dll", "d3d10core.dll", "d3d11.dll", "d3d9.dll")
-        )
-        for dll in dlls:
+        for dll in ("dxgi.dll", "d3d10core.dll", "d3d11.dll", "d3d9.dll"):
             # Remove existing DLLs.
             (self.prefix_system32 / dll).unlink(missing_ok=True)
             (self.prefix_syswow64 / dll).unlink(missing_ok=True)
@@ -304,12 +294,12 @@ class WineManagement:
 
     def _inject_d3d_extras(self) -> None:
         """
-        Add native `d3dx11_42.dll` to the WINE prefix.
+        Add native D3DX11 DLL to the WINE prefix.
 
         Native DLL needs to be used to fix frills memory leak potentially from
         `D3DX11LoadTextureFromTexture` use which is a stub in WINE.
         """
-        dll = "d3dx11_42.dll"
+        dll = f"{D3DX11_DLL_NAME}.dll"
 
         # Remove existing DLLs.
         (self.prefix_system32 / dll).unlink(missing_ok=True)
@@ -411,7 +401,7 @@ class WineManagement:
         if not self.latest_d3d_extras_path.exists():
             download_steps.append(self._download_d3d_extras)
         # DXVK
-        if sys.platform != "darwin" or MACOS_WINEHQ_WINE:
+        if sys.platform != "darwin":
             if not self.latest_dxvk_path.exists():
                 download_steps.append(self._download_dxvk)
             inject_steps.append(self._inject_dxvk)
@@ -471,13 +461,11 @@ def get_wine_process_args(
             "mshtml=d",
             # Native DLL needs to be used to fix frills memory leak potentially from
             # `D3DX11LoadTextureFromTexture` use which is a stub in WINE.
-            "d3dx11_42=n",
+            f"{D3DX11_DLL_NAME}=n",
         ]
         # Add dll overrides for DirectX, so DXVK is used instead of wine3d.
         if sys.platform != "darwin":
             wine_dll_overrides.extend(("d3d11=n", "dxgi=n", "d3d10core=n", "d3d9=n"))
-        elif MACOS_WINEHQ_WINE:
-            wine_dll_overrides.extend(("d3d11=n", "d3d10core=n"))
         edited_environment["WINEDLLOVERRIDES"] = ";".join(wine_dll_overrides)
 
         if sys.platform != "darwin":
@@ -506,13 +494,12 @@ def get_wine_process_args(
                 )
             )
 
-            if not MACOS_WINEHQ_WINE:
-                edited_environment["WINEDLLPATH_PREPEND"] = str(
-                    wine_management.latest_sikarugir_frameworks_path
-                    / "renderer"
-                    / "dxvk"
-                    / "wine"
-                )
+            edited_environment["WINEDLLPATH_PREPEND"] = str(
+                wine_management.latest_sikarugir_frameworks_path
+                / "renderer"
+                / GRAPHICS_TRANSLATION_LAYER.lower()
+                / "wine"
+            )
 
             # "wine doesn't handle VK_ERROR_DEVICE_LOST correctly"
             #     -- <https://github.com/Gcenx/macOS_Wine_builds/releases/tag/10.18>

@@ -24,7 +24,7 @@ from .game_config import ClientType, GameConfig, GameConfigID, GameType
 from .network.game_launcher_config import GameLauncherConfig
 from .network.world import World
 from .resources import OneLauncherLocale
-from .wine_environment import get_wine_process_args
+from .wine_environment import GRAPHICS_TRANSLATION_LAYER, get_wine_process_args
 
 logger = logging.getLogger(__name__)
 logger.addFilter(ExternalProcessLogsFilter())
@@ -201,10 +201,16 @@ async def update_game_user_preferences(
             config["Display"]["ScreenMode"] = "FullScreenWindowed"
 
         if game_config.wine.builtin_prefix_enabled:
+            # Prevent certain graphical artifacts with DXMT like above forges.
+            if GRAPHICS_TRANSLATION_LAYER == "DXMT":
+                with suppress(configparser.DuplicateSectionError):
+                    config.add_section("Display")
+                config["Display"].setdefault("Antialiasing", "Disabled")
+
             with suppress(configparser.DuplicateSectionError):
                 config.add_section("Render")
 
-            # Always use DirectX11 with DXVK on macOS.
+            # Always use DirectX11 on macOS.
             config["Render"]["D3DVersionPromptedForAtStartup"] = "11"
             config["Render"]["GraphicsCore"] = "D3D11"
 
